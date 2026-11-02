@@ -1,0 +1,2 @@
+# Bibliotecas de terceiros: manter os arquivos exatamente como publicados
+web/vendor/** -text
