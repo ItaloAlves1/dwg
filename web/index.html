@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Conversor PDF → DWG</title>
+<title>Conversor PDF → DXF</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <header class="top">
     <div>
-      <h1>Conversor PDF → DWG</h1>
-      <p class="sub">Desenhos escaneados viram DWG (AutoCAD 2018) com linhas, símbolos, textos e marcações de as-built em camadas separadas.</p>
+      <h1>Conversor PDF → DXF</h1>
+      <p class="sub">Desenhos escaneados viram DXF editável (abre direto no AutoCAD; use "Salvar como" para DWG), com linhas, símbolos, textos e marcações de as-built em camadas separadas.</p>
     </div>
     <div id="user" hidden><span id="userEmail"></span> <button id="logout">Sair</button></div>
   </header>
@@ -32,12 +32,13 @@
 
   <!-- App -->
   <section id="app" hidden>
-    <div id="worker" class="worker"></div>
+    <div id="busy" class="busy" hidden></div>
     <div id="drop" tabindex="0" role="button">
       <strong>Solte os PDFs aqui</strong>
-      <span>ou clique para escolher — até 50 MB por arquivo, vários de uma vez</span>
+      <span>ou clique para escolher. A conversão roda neste computador: o PDF não sai dele, só o resultado é salvo na sua conta.</span>
       <input id="file" type="file" accept="application/pdf,.pdf" multiple hidden>
     </div>
+    <input id="resumeFile" type="file" accept="application/pdf,.pdf" hidden>
     <p id="msg" class="msg"></p>
     <div id="jobs"></div>
   </section>
@@ -49,6 +50,7 @@
 <script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
-<script src="app.js"></script>
+<script src="vendor/tesseract.min.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

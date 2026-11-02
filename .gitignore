@@ -5,11 +5,6 @@ node_modules/
 # Gerado no build a partir das variáveis de ambiente
 web/config.js
 
-# Arquivos do worker (PDFs e resultados temporários, dados do OCR)
-worker/cache/
-worker/oda/
-*.traineddata
-
 # Desenhos são documentos internos: nunca versionar
 *.pdf
 *.dwg

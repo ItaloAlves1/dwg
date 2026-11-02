@@ -1,6 +1,8 @@
-# Conversor PDF → DWG
+# Conversor PDF → DXF
 
-Converte desenhos técnicos escaneados (PDF com imagens) em arquivos **DWG** editáveis, com cada folha em um DWG (AutoCAD 2018) separado em camadas:
+Converte desenhos técnicos escaneados (PDF com imagens) em arquivos **DXF** editáveis, um por folha. O AutoCAD abre DXF direto; para ter DWG, use **Salvar como → DWG**.
+
+Cada DXF vem separado em camadas:
 
 | Camada | Conteúdo |
 |---|---|
@@ -13,16 +15,20 @@ Converte desenhos técnicos escaneados (PDF com imagens) em arquivos **DWG** edi
 ## Como funciona
 
 ```
-Navegador ──► Site (Vercel) ──► Supabase ◄── Worker (seu PC Windows)
-              login, envio,     Auth, banco     lê a fila, converte
-              progresso, ZIP    e arquivos      e devolve os DWG
+Navegador de quem usa ──────────────► Supabase
+  lê o PDF, OCR, vetoriza,             login, histórico,
+  gera os DXF (nada sai do PC)         DXF e prévias
+          ▲
+          │ site estático
+       Vercel (seu domínio)
 ```
 
-- **`web/`**: site estático hospedado na Vercel. Faz login (Supabase Auth), envia os PDFs, mostra o progresso e baixa os DWG (um por folha ou tudo em ZIP).
-- **`supabase/schema.sql`**: tabelas, regras de acesso (cada usuário só vê os próprios arquivos), funções da fila e buckets de armazenamento.
-- **`worker/`**: programa que roda no Windows. Busca os PDFs na fila, converte com OCR (Tesseract) e vetorização própria, gera o DWG com o ODA File Converter e envia o resultado ao Supabase.
+- **Não há servidor de conversão.** Tudo roda no navegador de quem envia o PDF (pdf.js + Tesseract.js + vetorização própria em Web Workers). O PDF não é enviado para lugar nenhum; só os DXF e as prévias vão para a conta do usuário no Supabase.
+- **É preciso manter a aba aberta** enquanto converte. Se fechar no meio, o trabalho aparece como "interrompido": clique em **Continuar** e escolha o mesmo PDF; ele segue das folhas que faltam.
+- **Vercel** só hospeda os arquivos do site (pasta `web/`) no seu domínio.
+- **Supabase** guarda as contas (Auth), o histórico (tabelas `jobs` e `pages`) e os arquivos (bucket `resultados`).
 
-A conversão **não** roda na Vercel, porque o ODA File Converter é um programa instalado e o OCR é pesado demais para funções serverless. Enquanto o worker estiver desligado, os PDFs enviados ficam na fila e o site mostra "Conversor desligado".
+Tempo típico: 3 a 4 folhas a cada 10 segundos num PC comum (o PDF de teste, de 100 folhas, levou uns 5 minutos). Na primeira vez, o navegador baixa uns 15 MB de dados do OCR, que ficam em cache.
 
 ---
 
@@ -32,57 +38,54 @@ A conversão **não** roda na Vercel, porque o ODA File Converter é um programa
 
 1. Crie um projeto em [supabase.com](https://supabase.com).
 2. Abra **SQL Editor → New query**, cole todo o conteúdo de [`supabase/schema.sql`](supabase/schema.sql) e clique em **Run**.
-3. Em **Authentication → URL Configuration**, coloque a URL do site da Vercel (passo 2) em **Site URL** e em **Redirect URLs**. O link de confirmação de e-mail aponta para lá.
-4. Anote, em **Project Settings → API**:
-   - **Project URL**
-   - chave **anon / public** (vai para a Vercel)
-   - chave **service_role** (vai **só** para o worker; é secreta)
+3. Em **Project Settings → API**, anote o **Project URL** e a chave **anon / public**.
+4. Depois de publicar na Vercel (passo 2), volte em **Authentication → URL Configuration** e coloque a URL do site (o seu domínio) em **Site URL** e em **Redirect URLs**. É para lá que o link de confirmação de e-mail aponta.
 
-> **Quer restringir quem pode criar conta?** Em **Authentication → Sign In / Providers**, desative "Allow new users to sign up" depois de criar as contas necessárias, ou convide usuários por **Authentication → Users → Invite**.
+> **Quer restringir quem pode criar conta?** Depois de criar as contas necessárias, desative o cadastro em **Authentication → Sign In / Providers** ("Allow new users to sign up"), ou convide pessoas por **Authentication → Users → Invite**.
 
-### 2. Vercel (site)
+### 2. Vercel
 
 1. Em [vercel.com](https://vercel.com) → **Add New → Project** → importe este repositório do GitHub.
-2. Framework Preset: **Other**. Não altere Root Directory, Build Command ou Output Directory: tudo já está no `vercel.json`.
+2. Framework Preset: **Other**. Não altere Build Command nem Output Directory: já estão no `vercel.json`.
 3. Em **Environment Variables**, adicione:
    - `SUPABASE_URL` = Project URL
    - `SUPABASE_ANON_KEY` = chave anon / public
-4. Clique em **Deploy**. Se você instalar a integração oficial Supabase ↔ Vercel, ela cria `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY`, que também funcionam.
+4. **Deploy**.
+5. Para usar seu domínio: **Project → Settings → Domains → Add** e siga as instruções de DNS.
 
-### 3. Worker (no PC Windows que fará as conversões)
+Se você usar a integração oficial Supabase ↔ Vercel, ela cria `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY`, que também funcionam.
 
-Requisitos:
-- **Node.js 20.11 ou mais novo**: [nodejs.org](https://nodejs.org)
-- **ODA File Converter** (gratuito): [opendesign.com/guestfiles/oda_file_converter](https://www.opendesign.com/guestfiles/oda_file_converter). Instale normalmente; o worker o encontra sozinho em `C:\Program Files\ODA\`.
+### Testar localmente (opcional)
 
-Passos:
-1. Na pasta `worker`, copie `.env.example` para `.env` e preencha `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`.
-2. Dê dois cliques em **`Iniciar Worker.bat`**. Na primeira vez ele instala as dependências.
-3. Deixe a janela aberta. O site passa a mostrar **"Conversor ligado"**.
+Copie `web/config.example.js` para `web/config.js`, preencha e sirva a pasta `web/` com qualquer servidor estático, por exemplo:
 
-Você pode rodar o worker em mais de um PC ao mesmo tempo: a fila divide as folhas entre eles sem repetir.
+```bash
+npx serve web
+```
+
+(Abrir o `index.html` direto pelo explorador de arquivos não funciona, porque os Web Workers exigem um servidor.)
 
 ---
 
 ## Uso
 
 1. Abra o site, crie a conta (confirme pelo e-mail) e entre.
-2. Arraste os PDFs (até 50 MB cada).
-3. Acompanhe o progresso; em **Ver folhas** aparecem as prévias, que ampliam ao clicar.
-4. **Baixar DWG (.zip)** baixa todas as folhas prontas. Também é possível baixar folha por folha.
+2. Arraste os PDFs. A conversão começa na hora; deixe a aba aberta.
+3. Em **Ver folhas** aparecem as prévias, que ampliam ao clicar. Dá para baixar folha por folha.
+4. **Baixar DXF (.zip)** baixa todas as folhas prontas (funciona também durante a conversão).
+5. No AutoCAD: abra o DXF e, se precisar, **Salvar como → DWG**. Para converter muitos DXF de uma vez em DWG, use o ODA File Converter (gratuito) no seu PC.
 
-Tempo típico: 7 a 12 segundos por folha, com várias folhas em paralelo.
+## Estrutura
 
-### Converter sem o site (linha de comando)
-
-```bash
-cd worker
-node convert.mjs "C:/caminho/arquivo.pdf" 20 saida
 ```
-
-Gera `saida/folha_020.dxf`, as prévias em PNG e `saida/dwg/folha_020.dwg`.
-
----
+web/                      site (publicado pela Vercel)
+  index.html, style.css, app.js     interface, login, histórico, download
+  conversor/conversor.js            orquestra: pdf.js → vetorizador → OCR → vetorizador
+  conversor/vetorizador.js          Web Worker: linhas, símbolos, textos, DXF e prévia
+  vendor/                           pdf.js e Tesseract.js (Apache-2.0)
+supabase/schema.sql       tabelas, RLS e bucket
+scripts/gerar-config.mjs  gera web/config.js no build da Vercel
+```
 
 ## Limitações conhecidas
 
@@ -90,11 +93,11 @@ Gera `saida/folha_020.dxf`, as prévias em PNG e `saida/dwg/folha_020.dwg`.
 - Círculos pequenos de terminais cortados por linhas podem sair abertos.
 - Logotipos e carimbos viram traços soltos.
 - A escala sai no tamanho da folha escaneada (mm); se o original for A3 ou A1, use `SCALE` no AutoCAD.
+- PDFs muito grandes usam bastante memória; em PCs com pouca RAM, converta um PDF por vez.
 - O resultado é um ponto de partida que exige revisão, não um desenho pronto.
 
 ## Segurança
 
 - A chave **anon** no site é pública por definição; o acesso aos dados é protegido pelo RLS (cada usuário só vê os próprios trabalhos e arquivos).
-- A chave **service_role** fica só no `worker/.env`, que não é versionado.
+- O PDF original nunca sai do computador de quem converte.
 - PDFs, DWG e DXF estão no `.gitignore`: os desenhos são documentos internos e não devem ir para o repositório.
-- O ODA File Converter não é distribuído neste repositório; cada PC o instala a partir do site oficial, conforme a licença da Open Design Alliance.

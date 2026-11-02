@@ -1,0 +1,3 @@
+Bibliotecas de terceiros incluídas nesta pasta (licença Apache-2.0):
+- pdf.js 4.10.38 (Mozilla) — pdf.min.mjs, pdf.worker.min.mjs — https://github.com/mozilla/pdf.js
+- Tesseract.js 5.1.1 — tesseract.min.js, tesseract-worker.min.js — https://github.com/naptha/tesseract.js
