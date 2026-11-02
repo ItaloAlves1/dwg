@@ -1,8 +1,8 @@
-# Conversor PDF → DXF
+# Conversor PDF → DWG
 
-Converte desenhos técnicos escaneados (PDF com imagens) em arquivos **DXF** editáveis, um por folha. O AutoCAD abre DXF direto; para ter DWG, use **Salvar como → DWG**.
+Converte desenhos técnicos escaneados (PDF com imagens) em arquivos **DWG** (AutoCAD 2018) e **DXF** editáveis, um por folha.
 
-Cada DXF vem separado em camadas:
+Cada desenho vem separado em camadas:
 
 | Camada | Conteúdo |
 |---|---|
@@ -15,15 +15,16 @@ Cada DXF vem separado em camadas:
 ## Como funciona
 
 ```
-Navegador de quem usa ──────────────► Supabase
-  lê o PDF, OCR, vetoriza,             login, histórico,
-  gera os DXF (nada sai do PC)         DXF e prévias
-          ▲
+Navegador de quem usa ──────────────► Supabase ◄────────────── Agente DWG (um PC Windows)
+  lê o PDF, OCR, vetoriza,             login, histórico,        quando ligado: baixa os DXF
+  gera os DXF (nada sai do PC)         DXF, DWG e prévias       novos, converte com o ODA
+          ▲                                                      File Converter e envia o DWG
           │ site estático
        Vercel (seu domínio)
 ```
 
-- **Não há servidor de conversão.** Tudo roda no navegador de quem envia o PDF (pdf.js + Tesseract.js + vetorização própria em Web Workers). O PDF não é enviado para lugar nenhum; só os DXF e as prévias vão para a conta do usuário no Supabase.
+- **O DXF não depende de servidor.** Ele é gerado no navegador de quem envia o PDF (pdf.js + Tesseract.js + vetorização própria em Web Workers). O PDF não é enviado para lugar nenhum; só os DXF e as prévias vão para a conta do usuário no Supabase.
+- **O DWG é gerado pelo agente** (pasta `agente-dwg/`), que roda escondido num PC Windows e inicia junto com ele. O PC **não precisa ficar ligado o tempo todo**: se estiver desligado, os DXF ficam prontos na hora e os DWG saem quando ele for ligado. O site mostra "Conversor DWG ligado/desligado".
 - **É preciso manter a aba aberta** enquanto converte. Se fechar no meio, o trabalho aparece como "interrompido": clique em **Continuar** e escolha o mesmo PDF; ele segue das folhas que faltam.
 - **Vercel** só hospeda os arquivos do site (pasta `web/`) no seu domínio.
 - **Supabase** guarda as contas (Auth), o histórico (tabelas `jobs` e `pages`) e os arquivos (bucket `resultados`).
@@ -55,6 +56,20 @@ Tempo típico: 3 a 4 folhas a cada 10 segundos num PC comum (o PDF de teste, de 
 
 Se você usar a integração oficial Supabase ↔ Vercel, ela cria `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY`, que também funcionam.
 
+### 3. Agente DWG (no PC Windows que vai gerar os DWG)
+
+Requisito: **Node.js 20.11 ou mais novo** ([nodejs.org](https://nodejs.org)).
+
+1. Se o seu Supabase foi criado antes desta versão, rode [`supabase/migracao-002-dwg.sql`](supabase/migracao-002-dwg.sql) no SQL Editor (quem roda o `schema.sql` atual já tem tudo).
+2. Na pasta `agente-dwg`, dê dois cliques em **`instalar.bat`** e informe a URL do projeto Supabase. Ele:
+   - copia o agente para `%LOCALAPPDATA%\ConversorDWG`;
+   - baixa o ODA File Converter oficial (gratuito) e confere a assinatura digital;
+   - cria o atalho para iniciar junto com o Windows, sem janela.
+3. O Bloco de Notas abre o arquivo `.env`: cole a chave **service_role** (Supabase → Project Settings → API Keys) em `SUPABASE_SERVICE_ROLE_KEY=` e salve. Essa chave é secreta e fica só nesse PC.
+4. Rode **`instalar.bat`** de novo (ou reinicie o PC) para ligar o agente. O site passa a mostrar "Conversor DWG ligado".
+
+Na pasta `%LOCALAPPDATA%\ConversorDWG`: **`parar.bat`** desliga o agente, **`ver-log.bat`** mostra o registro do que ele fez e `iniciar-oculto.vbs` liga de novo. Para desinstalar, rode `parar.bat`, apague essa pasta e o atalho "Conversor DWG" em `shell:startup`.
+
 ### Testar localmente (opcional)
 
 Copie `web/config.example.js` para `web/config.js`, preencha e sirva a pasta `web/` com qualquer servidor estático, por exemplo:
@@ -72,8 +87,7 @@ npx serve web
 1. Abra o site, crie a conta (confirme pelo e-mail) e entre.
 2. Arraste os PDFs. A conversão começa na hora; deixe a aba aberta.
 3. Em **Ver folhas** aparecem as prévias, que ampliam ao clicar. Dá para baixar folha por folha.
-4. **Baixar DXF (.zip)** baixa todas as folhas prontas (funciona também durante a conversão).
-5. No AutoCAD: abra o DXF e, se precisar, **Salvar como → DWG**. Para converter muitos DXF de uma vez em DWG, use o ODA File Converter (gratuito) no seu PC.
+4. **Baixar DWG (.zip)** baixa todas as folhas já convertidas em DWG; **Baixar DXF (.zip)** baixa os DXF (disponíveis mesmo com o agente desligado).
 
 ## Estrutura
 
@@ -83,7 +97,8 @@ web/                      site (publicado pela Vercel)
   conversor/conversor.js            orquestra: pdf.js → vetorizador → OCR → vetorizador
   conversor/vetorizador.js          Web Worker: linhas, símbolos, textos, DXF e prévia
   vendor/                           pdf.js e Tesseract.js (Apache-2.0)
-supabase/schema.sql       tabelas, RLS e bucket
+agente-dwg/               agente do PC: DXF → DWG com o ODA File Converter, instalador
+supabase/schema.sql       tabelas, RLS e bucket (migracao-002-dwg.sql: atualização para DWG)
 scripts/gerar-config.mjs  gera web/config.js no build da Vercel
 ```
 

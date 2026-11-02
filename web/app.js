@@ -213,19 +213,28 @@ window.addEventListener('beforeunload', e => {
 // ---------- Lista ----------
 async function refresh() {
   if (!user) return;
-  const [jobsRes, progRes] = await Promise.all([
+  const [jobsRes, progRes, agRes] = await Promise.all([
     sb.from('jobs').select('id,name,status,page_count,size_bytes,created_at').order('created_at', { ascending: false }).limit(100),
     sb.from('job_progress').select('*'),
+    sb.from('agentes').select('last_seen').order('last_seen', { ascending: false }).limit(1),
   ]);
   if (jobsRes.error) return msg(`Erro ao carregar: ${jobsRes.error.message}`, true);
   const jobs = jobsRes.data;
   const prog = new Map((progRes.data || []).map(p => [p.job_id, p]));
 
+  // Agente DWG (PC com o ODA): ligado se deu sinal de vida nos últimos 2 minutos.
+  const visto = agRes.data?.[0]?.last_seen;
+  const ligado = visto && Date.now() - new Date(visto).getTime() < 2 * 60 * 1000;
+  $('#agente').className = 'agente' + (ligado ? ' on' : '');
+  $('#agente').textContent = ligado
+    ? 'Conversor DWG ligado: os DWG saem logo depois dos DXF.'
+    : 'Conversor DWG desligado: os DXF ficam prontos agora e os DWG são gerados quando o PC do conversor for ligado.';
+
   // Folhas só dos trabalhos abertos.
   const openIds = jobs.filter(j => open.has(j.id)).map(j => j.id);
   const pagesBy = new Map();
   if (openIds.length) {
-    const { data } = await sb.from('pages').select('job_id,n,status,dxf_path,preview_path')
+    const { data } = await sb.from('pages').select('job_id,n,status,dxf_path,dwg_path,preview_path')
       .in('job_id', openIds).order('n').limit(10000);
     for (const p of data || []) (pagesBy.get(p.job_id) || pagesBy.set(p.job_id, []).get(p.job_id)).push(p);
     // Renova a URL assinada 10 min antes de ela expirar.
@@ -252,8 +261,8 @@ function render(jobs, prog, pagesBy) {
   if (!jobs.length) html = '<p class="empty">Nenhum PDF convertido ainda.</p>';
   else html = jobs.map(job => {
     const total = job.page_count;
-    const p = prog.get(job.id) || { prontas: 0, falhas: 0 };
-    const ok = +p.prontas, bad = +p.falhas;
+    const p = prog.get(job.id) || { prontas: 0, falhas: 0, dwgs: 0 };
+    const ok = +p.prontas, bad = +p.falhas, dwgs = +(p.dwgs || 0);
     const when = new Date(job.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
     const [chip, rotulo] = situacao(job);
     const ativo = ativos.has(job.id) || filaPdfs.some(f => f.job.id === job.id);
@@ -262,18 +271,22 @@ function render(jobs, prog, pagesBy) {
       const pic = pg.status === 'pronta' && signed.has(pg.preview_path)
         ? `<img loading="lazy" src="${signed.get(pg.preview_path).url}" alt="Folha ${pg.n}" data-zoom>`
         : `<div class="ph ${pg.status === 'falhou' ? 'fail' : ''}">${pg.status}</div>`;
-      const link = pg.status === 'pronta' ? `<button data-dxf="${esc(pg.dxf_path)}" data-name="${esc(stem(job.name))}_folha_${pad(pg.n)}.dxf">DXF</button>` : '';
+      const nome = `${esc(stem(job.name))}_folha_${pad(pg.n)}`;
+      const link = pg.status !== 'pronta' ? '' : `<span class="links">`
+        + (pg.dwg_path ? `<button data-arq="${esc(pg.dwg_path)}" data-name="${nome}.dwg">DWG</button>` : '<span class="meta" title="Aguardando o conversor DWG">DWG…</span>')
+        + `<button data-arq="${esc(pg.dxf_path)}" data-name="${nome}.dxf">DXF</button></span>`;
       return `<div class="page">${pic}<footer><span>Folha ${pg.n}</span>${link}</footer></div>`;
     }).join('') || '<span class="meta">As folhas aparecem aqui conforme ficam prontas.</span>'}</div>` : '';
     return `<article class="job">
       <div class="head">
         <div><div class="name">${esc(job.name)}</div>
-          <div class="meta">${total} folhas · ${ok} prontas${bad ? ` · <span style="color:var(--err)">${bad} com falha</span>` : ''} · ${when}</div></div>
+          <div class="meta">${total} folhas · ${ok} prontas · ${dwgs} em DWG${bad ? ` · <span style="color:var(--err)">${bad} com falha</span>` : ''} · ${when}</div></div>
         <span class="chip ${chip}">${rotulo}</span>
       </div>
       <div class="bar"><i class="ok" style="width:${ok / total * 100}%"></i><i class="bad" style="width:${bad / total * 100}%"></i></div>
       <div class="actions">
-        <button class="primary" data-zip="${job.id}" ${ok ? '' : 'disabled'}>Baixar DXF (.zip)${job.status !== 'concluído' && ok ? ' — parcial' : ''}</button>
+        <button class="primary" data-zip="${job.id}" data-tipo="dwg" ${dwgs ? '' : 'disabled'}>Baixar DWG (.zip)${dwgs && dwgs < total ? ` — ${dwgs}/${total}` : ''}</button>
+        <button data-zip="${job.id}" data-tipo="dxf" ${ok ? '' : 'disabled'}>Baixar DXF (.zip)${job.status !== 'concluído' && ok ? ' — parcial' : ''}</button>
         <button data-toggle="${job.id}">${open.has(job.id) ? 'Ocultar folhas' : 'Ver folhas'}</button>
         ${podeContinuar ? `<button data-resume="${job.id}" title="Escolha de novo o mesmo PDF">Continuar${bad ? ' / refazer falhas' : ''}</button>` : ''}
         ${ativos.has(job.id) ? `<button data-stop="${job.id}">Parar</button>` : ''}
@@ -291,14 +304,16 @@ function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
 
-async function downloadZip(jobId, btn) {
+async function downloadZip(jobId, btn, tipo) {
+  const col = `${tipo}_path`, ext = tipo;  // tipo: 'dwg' ou 'dxf'
   const { data: job } = await sb.from('jobs').select('name').eq('id', jobId).single();
-  const { data: pages, error } = await sb.from('pages').select('n,dxf_path').eq('job_id', jobId).eq('status', 'pronta').order('n').limit(10000);
-  if (error || !pages.length) return msg('Nenhuma folha pronta para baixar.', true);
+  const { data: pages, error } = await sb.from('pages').select(`n,${col}`).eq('job_id', jobId).eq('status', 'pronta')
+    .not(col, 'is', null).order('n').limit(10000);
+  if (error || !pages.length) return msg(`Nenhuma folha em ${ext.toUpperCase()} para baixar.`, true);
   const label = btn.textContent;
   btn.disabled = true;
   try {
-    const { data: urls, error: e2 } = await sb.storage.from('resultados').createSignedUrls(pages.map(p => p.dxf_path), 600);
+    const { data: urls, error: e2 } = await sb.storage.from('resultados').createSignedUrls(pages.map(p => p[col]), 600);
     if (e2) throw e2;
     const files = {};
     let done = 0;
@@ -307,14 +322,14 @@ async function downloadZip(jobId, btn) {
       await Promise.all(pages.slice(i, i + 6).map(async (p, k) => {
         const res = await fetch(urls[i + k].signedUrl);
         if (!res.ok) throw new Error(`folha ${p.n}: HTTP ${res.status}`);
-        files[`folha_${pad(p.n)}.dxf`] = new Uint8Array(await res.arrayBuffer());
+        files[`folha_${pad(p.n)}.${ext}`] = new Uint8Array(await res.arrayBuffer());
         btn.textContent = `Baixando ${++done}/${pages.length}…`;
       }));
     }
     btn.textContent = 'Compactando…';
     const ordered = {};  // no ZIP, folhas em ordem (os downloads terminam fora de ordem)
-    for (const p of pages) ordered[`folha_${pad(p.n)}.dxf`] = files[`folha_${pad(p.n)}.dxf`];
-    saveBlob(new Blob([fflate.zipSync(ordered, { level: 6 })], { type: 'application/zip' }), `${stem(job.name)}_DXF.zip`);
+    for (const p of pages) ordered[`folha_${pad(p.n)}.${ext}`] = files[`folha_${pad(p.n)}.${ext}`];
+    saveBlob(new Blob([fflate.zipSync(ordered, { level: 6 })], { type: 'application/zip' }), `${stem(job.name)}_${ext.toUpperCase()}.zip`);
   } catch (e) {
     msg(`Falha no download: ${e.message}`, true);
   } finally {
@@ -339,9 +354,9 @@ $('#jobs').onclick = async e => {
   if (!t) return;
   const d = t.dataset;
   if (d.toggle) { open.has(d.toggle) ? open.delete(d.toggle) : open.add(d.toggle); refresh(); }
-  if (d.zip) downloadZip(d.zip, t);
-  if (d.dxf) {
-    const { data, error } = await sb.storage.from('resultados').createSignedUrl(d.dxf, 60, { download: d.name });
+  if (d.zip) downloadZip(d.zip, t, d.tipo);
+  if (d.arq) {
+    const { data, error } = await sb.storage.from('resultados').createSignedUrl(d.arq, 60, { download: d.name });
     if (error) return msg(`Falha no download: ${error.message}`, true);
     location.href = data.signedUrl;
   }

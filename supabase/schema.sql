@@ -24,6 +24,8 @@ create table if not exists public.pages (
   n            int  not null,
   status       text not null check (status in ('pronta', 'falhou')),
   dxf_path     text,                               -- caminho no bucket "resultados"
+  dwg_path     text,                               -- gerado depois pelo agente do PC
+  dwg_erro     text,                               -- erro da última tentativa de gerar o DWG
   preview_path text,
   stats        jsonb,                              -- contagens de linhas, textos etc.
   updated_at   timestamptz not null default now(),
@@ -32,19 +34,35 @@ create table if not exists public.pages (
 
 create index if not exists jobs_user_idx on public.jobs (user_id, created_at desc);
 
+-- Fila do agente DWG: folhas prontas que ainda não têm DWG.
+create index if not exists pages_sem_dwg_idx on public.pages (updated_at)
+  where status = 'pronta' and dwg_path is null and dwg_erro is null;
+
 -- Resumo do progresso de cada trabalho (respeita o RLS de quem consulta).
 create or replace view public.job_progress with (security_invoker = true) as
 select job_id,
        count(*) filter (where status = 'pronta') as prontas,
-       count(*) filter (where status = 'falhou') as falhas
+       count(*) filter (where status = 'falhou') as falhas,
+       count(*) filter (where dwg_path is not null) as dwgs
   from public.pages
  group by job_id;
+
+-- Sinal de vida do agente DWG (PC com o ODA File Converter), para o site mostrar se está ligado.
+create table if not exists public.agentes (
+  nome      text primary key,
+  last_seen timestamptz not null default now()
+);
 
 -- ---------------------------------------------------------------------------
 -- Segurança (RLS): cada usuário só vê e altera os próprios trabalhos.
 -- ---------------------------------------------------------------------------
-alter table public.jobs  enable row level security;
-alter table public.pages enable row level security;
+alter table public.jobs    enable row level security;
+alter table public.pages   enable row level security;
+alter table public.agentes enable row level security;
+
+drop policy if exists "agentes: usuários logados veem" on public.agentes;
+create policy "agentes: usuários logados veem" on public.agentes
+  for select to authenticated using (true);
 
 drop policy if exists "jobs: dono" on public.jobs;
 create policy "jobs: dono" on public.jobs

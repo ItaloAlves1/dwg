@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Conversor PDF → DXF</title>
+<title>Conversor PDF → DWG</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="deslogado">
 <main>
   <header class="top">
     <div>
-      <h1>Conversor PDF → DXF</h1>
-      <p class="sub">Desenhos escaneados viram DXF editável (abre direto no AutoCAD; use "Salvar como" para DWG), com linhas, símbolos, textos e marcações de as-built em camadas separadas.</p>
+      <h1>Conversor PDF → DWG</h1>
+      <p class="sub">Desenhos escaneados viram DWG e DXF editáveis, com linhas, símbolos, textos e marcações de as-built em camadas separadas.</p>
     </div>
     <div id="user" hidden><span id="userEmail"></span> <button id="logout">Sair</button></div>
   </header>
@@ -32,6 +32,7 @@
 
   <!-- App -->
   <section id="app" hidden>
+    <div id="agente" class="agente"></div>
     <div id="busy" class="busy" hidden></div>
     <div id="drop" tabindex="0" role="button">
       <strong>Solte os PDFs aqui</strong>
