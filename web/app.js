@@ -57,6 +57,7 @@ function traduzErro(m) {
 
 sb.auth.onAuthStateChange((_event, session) => {
   user = session?.user || null;
+  document.body.classList.toggle('deslogado', !user);
   $('#auth').hidden = !!user;
   $('#app').hidden = !user;
   $('#user').hidden = !user;
