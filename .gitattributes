@@ -1,2 +1,6 @@
 # Bibliotecas de terceiros: manter os arquivos exatamente como publicados
 web/vendor/** -text
+# Scripts do Windows precisam de CRLF (inclusive para quem baixar o ZIP do GitHub)
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.ps1 text eol=crlf
