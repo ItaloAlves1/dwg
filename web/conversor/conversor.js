@@ -12,6 +12,13 @@ const TESSERACT_CORE = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1';
 // Quantas folhas ao mesmo tempo: metade dos núcleos, entre 1 e 4 (cada folha usa ~150 MB de memória).
 export const PARALELO = Math.min(4, Math.max(1, Math.floor((navigator.hardwareConcurrency || 2) / 2)));
 
+// Falha com mensagem clara se a promessa não terminar no tempo dado (evita folha travada para sempre).
+function comLimite(promessa, ms, motivo) {
+  let timer;
+  return Promise.race([promessa, new Promise((_, falha) => { timer = setTimeout(() => falha(new Error(motivo)), ms); })])
+    .finally(() => clearTimeout(timer));
+}
+
 export async function abrirPdf(file) {
   return pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
 }
@@ -25,16 +32,26 @@ class PoolVetorizador {
   }
   async usar(fn) {
     const w = this.livres.pop() || await new Promise(r => this.espera.push(r));
-    try { return await fn(w); } finally { const prox = this.espera.shift(); prox ? prox(w) : this.livres.push(w); }
+    try { return await fn(w); } finally {
+      // Worker que travou ou quebrou (ex.: falta de memória) é trocado por um novo.
+      const devolver = w.quebrado ? new Worker(VETORIZADOR) : w;
+      const prox = this.espera.shift();
+      prox ? prox(devolver) : this.livres.push(devolver);
+    }
   }
-  static chamar(w, msg, transfer = []) {
+  static chamar(w, msg, transfer = [], limiteMs = 5 * 60 * 1000) {
     return new Promise((ok, falha) => {
+      const fim = () => { clearTimeout(timer); w.removeEventListener('message', handler); w.removeEventListener('error', erro); };
+      const quebrar = motivo => { fim(); w.quebrado = true; w.terminate(); falha(new Error(motivo)); };
       const handler = ({ data }) => {
         if (data.id !== msg.id) return;
-        w.removeEventListener('message', handler);
+        fim();
         data.ok ? ok(data) : falha(new Error(data.erro));
       };
+      const erro = e => { e.preventDefault?.(); quebrar(`o vetorizador parou: ${e.message || 'erro desconhecido (memória insuficiente?)'}`); };
+      const timer = setTimeout(() => quebrar('a folha demorou demais para ser processada'), limiteMs);
       w.addEventListener('message', handler);
+      w.addEventListener('error', erro);
       w.postMessage(msg, transfer);
     });
   }
@@ -84,7 +101,9 @@ export class Conversor {
       const id = ++this.pool.seq;
       try {
         const { imagens } = await PoolVetorizador.chamar(w, { type: 'preparar', id, width, height, buffer: data.buffer }, [data.buffer]);
-        const [orig, limpa, girada] = await Promise.all([this.ocr(imagens.original), this.ocr(imagens.limpa), this.ocr(imagens.girada)]);
+        const [orig, limpa, girada] = await comLimite(
+          Promise.all([this.ocr(imagens.original), this.ocr(imagens.limpa), this.ocr(imagens.girada)]),
+          5 * 60 * 1000, 'o leitor de textos (OCR) não respondeu');
         const ocr = [
           { lines: orig, vertical: false, original: true },
           { lines: limpa, vertical: false, original: false },

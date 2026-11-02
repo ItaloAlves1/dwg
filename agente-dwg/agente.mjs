@@ -77,14 +77,24 @@ async function rest(metodo, caminho, corpo, extra = {}) {
   return res.status === 204 ? null : res.json().catch(() => null);
 }
 
+const objeto = caminho => `${URL_SB}/storage/v1/object/resultados/${caminho.split('/').map(encodeURIComponent).join('/')}`;
+
+// Erro que não adianta tentar de novo (arquivo inexistente, DXF que o ODA não converte).
+class ErroPermanente extends Error {}
+
 async function baixar(caminho) {
-  const res = await fetch(`${URL_SB}/storage/v1/object/resultados/${caminho.split('/').map(encodeURIComponent).join('/')}`, { headers: H });
+  const res = await fetch(objeto(caminho), { headers: H });
+  if (res.status === 400 || res.status === 404) throw new ErroPermanente(`DXF não encontrado no armazenamento (${caminho})`);
   if (!res.ok) throw new Error(`download ${caminho}: HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
 
+async function excluir(caminho) {
+  await fetch(objeto(caminho), { method: 'DELETE', headers: H }).catch(() => {});
+}
+
 async function enviar(caminho, dados) {
-  const res = await fetch(`${URL_SB}/storage/v1/object/resultados/${caminho.split('/').map(encodeURIComponent).join('/')}`, {
+  const res = await fetch(objeto(caminho), {
     method: 'POST',
     headers: { ...H, 'Content-Type': 'application/acad', 'x-upsert': 'true' },
     body: dados,
@@ -105,39 +115,47 @@ async function rodada() {
   fs.mkdirSync(entrada, { recursive: true });
   fs.mkdirSync(saida, { recursive: true });
 
+  // Erro permanente marca a folha (o site para de esperar por ela); erro de rede só registra,
+  // e a folha volta na próxima rodada.
+  const falhou = async (p, e) => {
+    log(`folha ${p.n} do trabalho ${p.job_id}: ${e.message}`);
+    if (e instanceof ErroPermanente)
+      await rest('PATCH', pagina(p.job_id, p.n), { dwg_erro: e.message.slice(0, 500) }).catch(() => {});
+  };
+
   // Nome local único por folha: <índice>.dxf (os caminhos do Supabase têm pastas e UUIDs).
   const itens = [];
   for (const [i, p] of fila.entries()) {
     try {
       fs.writeFileSync(path.join(entrada, `${i}.dxf`), await baixar(p.dxf_path));
       itens.push({ ...p, i });
-    } catch (e) {
-      log(`folha ${p.n} do trabalho ${p.job_id}: ${e.message}`);
-      await rest('PATCH', pagina(p.job_id, p.n), { dwg_erro: e.message.slice(0, 500) });
-    }
+    } catch (e) { await falhou(p, e); }
   }
-  if (!itens.length) return fila.length;
+  if (!itens.length) return 0;
 
   // ODAFileConverter <entrada> <saída> <versão> <tipo> <recursivo> <auditar> <filtro>
-  await run(ODA, [entrada, saida, 'ACAD2018', 'DWG', '0', '1', '*.DXF'], { timeout: 10 * 60 * 1000, windowsHide: true });
+  // Se o ODA quebrar no meio, as folhas que ele não gerou são marcadas abaixo, uma a uma.
+  try {
+    await run(ODA, [entrada, saida, 'ACAD2018', 'DWG', '0', '1', '*.DXF'], { timeout: 10 * 60 * 1000, windowsHide: true });
+  } catch (e) { log('o ODA terminou com erro:', e.message.split('\n')[0]); }
 
   let ok = 0;
   for (const p of itens) {
     const dwg = path.join(saida, `${p.i}.dwg`);
+    const destino = p.dxf_path.replace(/\.dxf$/i, '.dwg');
     try {
-      if (!fs.existsSync(dwg)) throw new Error('o ODA não gerou o DWG');
-      const destino = p.dxf_path.replace(/\.dxf$/i, '.dwg');
+      if (!fs.existsSync(dwg)) throw new ErroPermanente('o ODA File Converter não conseguiu gerar o DWG desta folha');
       await enviar(destino, fs.readFileSync(dwg));
-      await rest('PATCH', pagina(p.job_id, p.n), { dwg_path: destino, dwg_erro: null });
+      const linhas = await rest('PATCH', pagina(p.job_id, p.n), { dwg_path: destino, dwg_erro: null },
+        { Prefer: 'return=representation' });
+      // Trabalho excluído enquanto convertia: não deixa o DWG órfão no armazenamento.
+      if (!linhas?.length) { await excluir(destino); continue; }
       ok++;
-    } catch (e) {
-      log(`folha ${p.n} do trabalho ${p.job_id}: ${e.message}`);
-      await rest('PATCH', pagina(p.job_id, p.n), { dwg_erro: e.message.slice(0, 500) }).catch(() => {});
-    }
+    } catch (e) { await falhou(p, e); }
   }
   log(`${ok}/${itens.length} folhas convertidas em DWG`);
   fs.rmSync(TMP, { recursive: true, force: true });
-  return fila.length;
+  return ok === itens.length ? fila.length : 0;  // houve falha de rede: espera antes de tentar de novo
 }
 
 // ---------- Sinal de vida e laço principal ----------

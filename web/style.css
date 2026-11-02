@@ -30,6 +30,10 @@ body.deslogado .card h2 { text-align: center; }
 body.deslogado .card .actions button { flex: 1; padding: 9px 14px; }
 body.deslogado #authMsg { margin-bottom: 0; text-align: center; }
 body.deslogado #authMsg:empty { display: none; }
+.msg.ok { color: var(--ok); }
+.auth-links { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; margin-top: 14px; }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 13px; }
+button.link:hover { text-decoration: underline; }
 label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 12px; }
 input[type=email], input[type=password] {
   display: block; width: 100%; margin-top: 4px; padding: 8px 10px; font: inherit; color: var(--text);
