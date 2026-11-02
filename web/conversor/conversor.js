@@ -61,17 +61,23 @@ class PoolVetorizador {
 export class Conversor {
   constructor() {
     this.pool = new PoolVetorizador(PARALELO);
-    this.ocrPronto = this.iniciarOcr();
+    const n = Math.max(2, PARALELO);
+    // Leitor da folha inteira (texto esparso) e leitor de rótulos curtos ampliados (uma linha,
+    // só maiúsculas, números e sinais usados em desenhos).
+    this.ocrPronto = this.iniciarOcr(n, { tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, preserve_interword_spaces: '1' });
+    this.ocrCurtoPronto = this.iniciarOcr(n, {
+      tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/.:()+',
+    });
   }
 
-  async iniciarOcr() {
+  async iniciarOcr(n, parametros) {
     const scheduler = Tesseract.createScheduler();
-    const n = Math.max(2, PARALELO);
     await Promise.all(Array.from({ length: n }, async () => {
       const worker = await Tesseract.createWorker('por', 1, {
         workerPath: TESSERACT_WORKER, corePath: TESSERACT_CORE, workerBlobURL: false,
       });
-      await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, preserve_interword_spaces: '1' });
+      await worker.setParameters(parametros);
       scheduler.addWorker(worker);
     }));
     return scheduler;
@@ -80,12 +86,24 @@ export class Conversor {
   async ocr(imagem) {
     const scheduler = await this.ocrPronto;
     const { data } = await scheduler.addJob('recognize', imagem);
-    // Só o necessário, em objetos simples (para enviar ao Web Worker).
-    return data.lines.map(l => ({ text: l.text, confidence: l.confidence, bbox: l.bbox }));
+    // Só o necessário, em objetos simples (para enviar ao Web Worker), com as palavras de cada linha.
+    return data.lines.map(l => ({
+      text: l.text, confidence: l.confidence, bbox: l.bbox,
+      words: (l.words || []).map(w => ({ text: w.text, confidence: w.confidence, bbox: w.bbox })),
+    }));
+  }
+
+  // Segunda leitura: cada recorte ampliado é lido como uma linha curta.
+  async ocrCurtos(recortes) {
+    const scheduler = await this.ocrCurtoPronto;
+    return Promise.all(recortes.map(async ({ imagem, ...r }) => {
+      const { data } = await scheduler.addJob('recognize', imagem);
+      return { ...r, text: data.text, confidence: data.confidence };
+    }));
   }
 
   // Converte uma folha (número a partir de 1). Devolve { dxf: Uint8Array, preview: Blob, stats }.
-  async converterFolha(pdf, n) {
+  async converterFolha(pdf, n, opcoes = {}) {
     const page = await pdf.getPage(n);
     const vp = page.getViewport({ scale: DPI / 72 });
     const canvas = document.createElement('canvas');
@@ -109,7 +127,9 @@ export class Conversor {
           { lines: limpa, vertical: false, original: false },
           { lines: girada, vertical: true, original: false },
         ];
-        const { dxf, preview, stats } = await PoolVetorizador.chamar(w, { type: 'finalizar', id, ocr });
+        const { recortes } = await PoolVetorizador.chamar(w, { type: 'textos', id, ocr });
+        const curtos = await comLimite(this.ocrCurtos(recortes), 5 * 60 * 1000, 'a segunda leitura de textos não respondeu');
+        const { dxf, preview, stats } = await PoolVetorizador.chamar(w, { type: 'finalizar', id, curtos, larguraPrevia: opcoes.larguraPrevia });
         return { dxf, preview, stats };
       } catch (e) {
         w.postMessage({ type: 'descartar', id });
@@ -120,6 +140,7 @@ export class Conversor {
 
   async encerrar() {
     this.pool.encerrar();
-    try { await (await this.ocrPronto).terminate(); } catch { /* já encerrado */ }
+    for (const s of [this.ocrPronto, this.ocrCurtoPronto])
+      try { await (await s).terminate(); } catch { /* já encerrado */ }
   }
 }

@@ -7,8 +7,10 @@ Cada desenho vem separado em camadas:
 | Camada | Conteúdo |
 |---|---|
 | `LINHAS` | Linhas retas, molduras, pontos de ligação (●) |
+| `LINHAS_TRACEJADAS` | Linhas tracejadas, com tipo de linha no padrão medido na folha |
+| `CIRCULOS` | Círculos e arcos (terminais ○, furos, símbolos), como entidades CIRCLE/ARC |
 | `SIMBOLOS` | Contatos, bornes, terra e demais traços |
-| `TEXTO` | Textos reconhecidos por OCR, editáveis (inclusive verticais) |
+| `TEXTO` | Textos reconhecidos por OCR, editáveis (inclusive verticais e números de bornes), em fonte técnica romans.shx |
 | `TEXTO_REVISAR` | Textos com leitura duvidosa, para conferir |
 | `ASBUILT_VERMELHO` / `_LARANJA` / `_VERDE` / `_AZUL` | Marcações à mão do as-built, separadas pela cor |
 
