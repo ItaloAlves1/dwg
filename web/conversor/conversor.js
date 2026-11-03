@@ -119,13 +119,14 @@ export class Conversor {
       const id = ++this.pool.seq;
       try {
         const { imagens } = await PoolVetorizador.chamar(w, { type: 'preparar', id, width, height, buffer: data.buffer }, [data.buffer]);
-        const [orig, limpa, girada] = await comLimite(
-          Promise.all([this.ocr(imagens.original), this.ocr(imagens.limpa), this.ocr(imagens.girada)]),
+        const [orig, limpa, girada, ampliada] = await comLimite(
+          Promise.all([this.ocr(imagens.original), this.ocr(imagens.limpa), this.ocr(imagens.girada), this.ocr(imagens.ampliada)]),
           5 * 60 * 1000, 'o leitor de textos (OCR) não respondeu');
         const ocr = [
           { lines: orig, vertical: false, original: true },
           { lines: limpa, vertical: false, original: false },
           { lines: girada, vertical: true, original: false },
+          { lines: ampliada, vertical: false, original: false, escala: 1.5 },
         ];
         const { recortes } = await PoolVetorizador.chamar(w, { type: 'textos', id, ocr });
         const curtos = await comLimite(this.ocrCurtos(recortes), 5 * 60 * 1000, 'a segunda leitura de textos não respondeu');

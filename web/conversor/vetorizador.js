@@ -10,6 +10,7 @@ const DPI = 300;
 const MM = 25.4 / DPI;            // mm por pixel
 const MIN_LINE = 30;              // comprimento mínimo de linha reta (px ≈ 2.5 mm)
 const MAX_THICK = 14;             // espessura máxima de uma linha (px)
+const OCR_ESC = 1.5;              // ampliação das imagens entregues ao OCR (≈450 dpi)
 const NB = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]]; // vizinhos P2..P9
 
 const pages = new Map();          // id → estado entre as etapas
@@ -91,7 +92,16 @@ class Folha {
         if (x >= 0 && y >= 0 && x < W && y < H && Math.hypot(x - cx, y - cy) <= r + 1.5) resid[y * W + x] = 0;
     }
 
-    // Imagens para o OCR: original endireitada, sem linhas, e sem linhas girada 90° (textos verticais).
+    // Imagens para o OCR: original endireitada, sem linhas, e sem linhas girada 90° (textos verticais),
+    // mais a imagem sem linhas ampliada 1,5× (≈450 dpi) para letras pequenas e em negrito.
+    // Medido nas folhas: a ampliação piora textos de tamanho normal, por isso as duas leituras
+    // coexistem e, onde se sobrepõem, fica a mais confiável.
+    const ampliar = (src, w, h) => {
+      const c = new OffscreenCanvas(Math.round(w * OCR_ESC), Math.round(h * OCR_ESC)), g = c.getContext('2d');
+      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+      g.drawImage(src, 0, 0, c.width, c.height);
+      return c;
+    };
     const clean = mascaraParaCanvas(resid, W, H);
     const rot = new OffscreenCanvas(H, W), rc = rot.getContext('2d');
     rc.translate(H, 0); rc.rotate(Math.PI / 2); rc.drawImage(clean, 0, 0);
@@ -99,6 +109,7 @@ class Folha {
       original: await canvas.convertToBlob({ type: 'image/png' }),
       limpa: await clean.convertToBlob({ type: 'image/png' }),
       girada: await rot.convertToBlob({ type: 'image/png' }),
+      ampliada: await ampliar(clean, W, H).convertToBlob({ type: 'image/png' }),
     };
   }
 
@@ -276,12 +287,13 @@ class Folha {
       }));
     };
     let texts = [];
-    for (const { lines, vertical, original } of ocr) for (const line of lines.flatMap(trechos)) {
+    for (const { lines, vertical, original, escala = 1 } of ocr) for (const line of lines.flatMap(trechos)) {
       const str = line.text.trim();
       // Abaixo de 55% de confiança a leitura quase sempre é lixo ("16AE: N" em cima de um contato);
       // nesse caso o traço fica como símbolo, que é mais fiel ao original.
       if (!str || JUNK.test(str) || line.confidence < (vertical ? 60 : 55)) continue;
-      const { x0, y0, x1, y1 } = line.bbox;
+      // Leitura da imagem ampliada: volta as coordenadas para a escala da folha.
+      const [x0, y0, x1, y1] = ['x0', 'y0', 'x1', 'y1'].map(k => Math.round(line.bbox[k] / escala));
       if (y1 - y0 < 8 || y1 - y0 > 90) continue;
       if (vertical && str.replace(/\W/g, '').length < 3) continue;
       // Desenhos técnicos usam só maiúsculas: minúsculas com confiança baixa quase sempre são símbolos mal lidos.
@@ -382,13 +394,18 @@ class Folha {
         this.hSegs.some(s => Math.abs(s.c - a.cy) <= 0.6 * a.r && a.cx >= s.a - a.r && a.cx <= s.b + a.r));
       if (noFio) circulos.push({ cx: a.cx, cy: a.cy, r: a.r, span: 360 }); else arcos.push(a);
     }
-    const dots = this.dots.concat(sym.dots);
+    // Ponto "●" dentro de uma área de texto é pedaço de letra em negrito, não ponto de ligação.
+    const dentroDeTexto = d => texts.some(t => {
+      const a = areaTexto(t, H);
+      return d.x >= a.x0 - 3 && d.x <= a.x1 + 3 && d.y >= a.y0 - 3 && d.y <= a.y1 + 3;
+    });
+    const dots = this.dots.concat(sym.dots).filter(d => !dentroDeTexto(d));
     const asbuilt = {};
     for (const [cat, name] of [[1, 'VERMELHO'], [2, 'LARANJA'], [3, 'VERDE'], [4, 'AZUL']]) {
       const m = new Uint8Array(W * H);
       let n = 0;
       for (let i = 0; i < W * H; i++) if (this.colorCat[i] === cat) { m[i] = 1; n++; }
-      if (n >= 200) asbuilt[name] = this.vectorize(m, 10, false).polys;
+      if (n >= 200) asbuilt[name] = this.vetorizarMarcacoes(m);
     }
 
     const geo = { texts, polys: sym.polys, dots, asbuilt, circulos, arcos };
@@ -404,14 +421,37 @@ class Folha {
     return { dxf, preview, stats };
   }
 
+  // Marcações à mão (as-built): fecha as falhas do traço, segue a linha central e mede a largura.
+  // Marca-texto vira uma faixa larga (polilinha com espessura); caneta, um traço fino e suave.
+  vetorizarMarcacoes(mask) {
+    const { W, H } = this;
+    const m = fechar(mask, W, H, 2);
+    const out = [];
+    for (const c of this.components(m)) {
+      if (c.px.length < 30) continue;
+      const n = c.px.length;
+      const sk = this.thin(m, c.px);
+      const linhas = this.trace(m, sk).map(p => simplify(p, 2.5)).filter(p => polyLen(p) >= 10);
+      const comp = linhas.reduce((s, p) => s + polyLen(p), 0);
+      if (!comp) continue;
+      const largura = n / comp;  // área ÷ comprimento ≈ espessura média do traço
+      for (const p of linhas) out.push({ pts: p, largura: largura >= 7 ? largura : 0 });
+    }
+    return out;
+  }
+
   vectorize(mask, minLen, geometrico) {
     const out = { polys: [], dots: [], circulos: [], arcos: [] };
     const mx = 0.025 * this.W, my = 0.025 * this.H;
     for (const c of this.components(mask)) {
       const w = c.maxx - c.minx + 1, h = c.maxy - c.miny + 1;
       if (c.px.length < 6) continue;                               // poeira
-      // Manchas inteiramente na margem do escaneamento (sombra, furo, borda do papel).
+      // Manchas na margem do escaneamento (sombra, furo, borda do papel): inteiramente na faixa
+      // da borda, ou com a maior parte da tinta nela (borda do papel que entra um pouco na folha).
       if (c.maxx < mx || c.minx > this.W - mx || c.maxy < my || c.miny > this.H - my) continue;
+      let naBorda = 0;
+      for (const k of c.px) { const x = k % this.W, y = (k / this.W) | 0; if (x < mx || x > this.W - mx || y < my || y > this.H - my) naBorda++; }
+      if (naBorda > 0.6 * c.px.length) continue;
       if (w >= 7 && h >= 7 && w <= 26 && h <= 26 && Math.abs(w - h) <= 4 && c.px.length / (w * h) > 0.6) {
         const d = { x: (c.minx + c.maxx) / 2, y: (c.miny + c.maxy) / 2, r: (w + h) / 4 };
         if (!geometrico || this.anelVazio(d.x, d.y, d.r)) { out.dots.push(d); continue; }  // ponto de ligação
@@ -422,7 +462,7 @@ class Folha {
           const fit = ajustarCirculo(p, this.H);
           if (fit) { (fit.span >= 320 ? out.circulos : out.arcos).push(fit); continue; }
         }
-        const s = simplify(p, 1.3);
+        const s = simplify(p, 1.5);
         if (polyLen(s) >= minLen) out.polys.push(geometrico ? retificar(s) : s);
       }
     }
@@ -577,7 +617,7 @@ class Folha {
       g(72, 5); g(11, p2[0]); g(21, p2[1]); g(31, 0);  // alinhamento "Fit": ocupa a largura original
     }
     for (const [name, list] of Object.entries(asbuilt))
-      for (const p of list) pline(`ASBUILT_${name}`, p.map(([x, y]) => [X(x), Y(y)]));
+      for (const { pts, largura } of list) pline(`ASBUILT_${name}`, pts.map(([x, y]) => [X(x), Y(y)]), false, +(largura * MM).toFixed(3));
     g(0, 'ENDSEC'); g(0, 'EOF');
 
     // DXF R12 usa a página de código Windows-1252; acentos do português cabem em Latin-1.
@@ -624,11 +664,14 @@ class Folha {
       pc.fillText(t.str, 0, 0); pc.restore();
     }
     const colors = { VERMELHO: '#e00', LARANJA: '#f80', VERDE: '#0a0', AZUL: '#00f' };
-    for (const [name, list] of Object.entries(asbuilt)) {
-      pc.strokeStyle = colors[name]; pc.beginPath();
-      for (const p of list) { pc.moveTo(...p[0]); for (const q of p.slice(1)) pc.lineTo(...q); }
-      pc.stroke();
+    pc.lineJoin = 'round';
+    for (const [name, list] of Object.entries(asbuilt)) for (const { pts, largura } of list) {
+      pc.strokeStyle = colors[name];
+      pc.globalAlpha = largura ? 0.45 : 1;   // marca-texto translúcido, como no papel
+      pc.lineWidth = largura || 2.5;
+      pc.beginPath(); pc.moveTo(...pts[0]); for (const q of pts.slice(1)) pc.lineTo(...q); pc.stroke();
     }
+    pc.globalAlpha = 1;
     return pv.convertToBlob({ type: 'image/webp', quality: 0.85 });
   }
 }
@@ -833,17 +876,47 @@ function juntarArcos(arcos) {
   return { circulos, arcos: resto };
 }
 
-// Endireita traços quase horizontais/verticais (até 5°) das polilinhas de símbolos.
+// Endireita traços quase horizontais/verticais ou quase a 45° (até 5°) das polilinhas de símbolos.
 function retificar(p) {
   const q = p.map(v => v.slice());
   const tg = Math.tan(5 * Math.PI / 180);
   for (let i = 0; i < q.length - 1; i++) {
     const dx = q[i + 1][0] - q[i][0], dy = q[i + 1][1] - q[i][1];
-    if (Math.hypot(dx, dy) < 6) continue;
+    const L = Math.hypot(dx, dy);
+    if (L < 6) continue;
     if (Math.abs(dy) <= tg * Math.abs(dx)) { const y = (q[i][1] + q[i + 1][1]) / 2; q[i][1] = q[i + 1][1] = y; }
     else if (Math.abs(dx) <= tg * Math.abs(dy)) { const x = (q[i][0] + q[i + 1][0]) / 2; q[i][0] = q[i + 1][0] = x; }
+    else if (L >= 12 && Math.abs(Math.atan2(Math.abs(dy), Math.abs(dx)) * 180 / Math.PI - 45) <= 5) {
+      const d = (Math.abs(dx) + Math.abs(dy)) / 2;  // mantém o início, ajusta o fim para 45° exatos
+      q[i + 1][0] = q[i][0] + Math.sign(dx) * d; q[i + 1][1] = q[i][1] + Math.sign(dy) * d;
+    }
   }
   return q;
+}
+
+// Fechamento morfológico (dilata e depois erode, quadrado de lado 2r+1): emenda falhas pequenas.
+function fechar(m, W, H, r) {
+  const passo = (src, dilatar) => {
+    const tmp = new Uint8Array(W * H), out = new Uint8Array(W * H), k = 2 * r + 1;
+    for (let y = 0; y < H; y++) {      // horizontal
+      let s = 0;
+      for (let x = -r; x < W; x++) {
+        if (x + r < W) s += src[y * W + x + r];
+        if (x - r - 1 >= 0) s -= src[y * W + x - r - 1];
+        if (x >= 0) tmp[y * W + x] = dilatar ? (s > 0 ? 1 : 0) : (s === Math.min(k, Math.min(W, x + r + 1) - Math.max(0, x - r)) ? 1 : 0);
+      }
+    }
+    for (let x = 0; x < W; x++) {      // vertical
+      let s = 0;
+      for (let y = -r; y < H; y++) {
+        if (y + r < H) s += tmp[(y + r) * W + x];
+        if (y - r - 1 >= 0) s -= tmp[(y - r - 1) * W + x];
+        if (y >= 0) out[y * W + x] = dilatar ? (s > 0 ? 1 : 0) : (s === Math.min(k, Math.min(H, y + r + 1) - Math.max(0, y - r)) ? 1 : 0);
+      }
+    }
+    return out;
+  };
+  return passo(passo(m, true), false);
 }
 
 function simplify(pts, eps) {
