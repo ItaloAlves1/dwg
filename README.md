@@ -2,6 +2,8 @@
 
 Converte desenhos técnicos escaneados (PDF com imagens) em arquivos **DWG** (AutoCAD 2018) e **DXF** editáveis, um por folha.
 
+Ao abrir no AutoCAD, a folha já aparece enquadrada, com traço na espessura medida no papel (fios mais grossos, símbolos e tracejados mais finos) e textos em Arial TrueType, nítidos em qualquer zoom.
+
 Cada desenho vem separado em camadas:
 
 | Camada | Conteúdo |

@@ -196,6 +196,8 @@ class Folha {
         else if (mx === g) h = 60 * ((b - r) / sat + 2);
         else h = 60 * ((r - g) / sat + 4);
         if (h < 0) h += 360;
+        // Testado e descartado: tratar a tinta escura sob o marca-texto como fio. Nas folhas
+        // escaneadas ela é indistinguível da caneta laranja das nuvens de revisão.
         colorCat[i] = h < 18 || h >= 330 ? 1 : h < 70 ? 2 : h < 170 ? 3 : 4;
         lum[i] = 255;
       } else lum[i] = 0.3 * r + 0.59 * g + 0.11 * b;
@@ -561,6 +563,10 @@ class Folha {
     const med = v => (v.length ? v.sort((a, b) => a - b)[v.length >> 1] : 0);
     const traco = +(med(this.tracejadas.map(t => t.traco)) * MM || 2.5).toFixed(2);
     const vao = +(med(this.tracejadas.map(t => t.vao)) * MM || 1.25).toFixed(2);
+    // Espessura do traço igual à do papel: mediana da espessura medida dos fios e molduras.
+    // Fica gravada como largura da polilinha, então aparece nítida no AutoCAD em qualquer zoom.
+    const espFio = Math.min(0.5, Math.max(0.18, med([...this.hSegs, ...this.vSegs].map(s => s.y1 - s.y0 + 1)) * MM * 0.9));
+    const ESP = { LINHAS: +espFio.toFixed(2), LINHAS_TRACEJADAS: +(espFio * 0.8).toFixed(2), SIMBOLOS: +Math.max(0.13, espFio * 0.7).toFixed(2) };
 
     const d = [];
     const g = (code, val) => d.push(String(code), String(val));
@@ -572,6 +578,15 @@ class Folha {
     g(9, '$EXTMAX'); g(10, X(W)); g(20, Y(0)); g(30, 0);
     g(0, 'ENDSEC');
     g(0, 'SECTION'); g(2, 'TABLES');
+    // Vista inicial: abre com a folha inteira enquadrada na tela.
+    const larg = X(W), alt = Y(0);
+    g(0, 'TABLE'); g(2, 'VPORT'); g(70, 1);
+    g(0, 'VPORT'); g(2, '*ACTIVE'); g(70, 0);
+    g(10, 0); g(20, 0); g(11, 1); g(21, 1); g(12, +(larg / 2).toFixed(3)); g(22, +(alt / 2).toFixed(3));
+    g(13, 0); g(23, 0); g(14, 10); g(24, 10); g(15, 10); g(25, 10); g(16, 0); g(26, 0); g(36, 1); g(17, 0); g(27, 0); g(37, 0);
+    g(40, +(alt * 1.04).toFixed(3)); g(41, +(larg / alt).toFixed(4)); g(42, 50); g(43, 0); g(44, 0); g(50, 0); g(51, 0);
+    g(71, 0); g(72, 1000); g(73, 1); g(74, 3); g(75, 0); g(76, 0); g(77, 0); g(78, 0);
+    g(0, 'ENDTAB');
     g(0, 'TABLE'); g(2, 'LTYPE'); g(70, 2);
     g(0, 'LTYPE'); g(2, 'CONTINUOUS'); g(70, 0); g(3, 'Solid line'); g(72, 65); g(73, 0); g(40, 0);
     g(0, 'LTYPE'); g(2, 'TRACEJADA'); g(70, 0); g(3, '__ __ __'); g(72, 65); g(73, 2); g(40, +(traco + vao).toFixed(2)); g(49, traco); g(49, -vao);
@@ -579,9 +594,10 @@ class Folha {
     g(0, 'TABLE'); g(2, 'LAYER'); g(70, layers.length);
     for (const [name, col, lt] of layers) { g(0, 'LAYER'); g(2, name); g(70, 0); g(62, col); g(6, lt); }
     g(0, 'ENDTAB');
-    // Fonte técnica do AutoCAD (romans.shx), parecida com a letra dos desenhos.
+    // Fonte TrueType (Arial): o AutoCAD desenha a letra cheia e nítida, bem mais legível na tela
+    // que as fontes de traço único.
     g(0, 'TABLE'); g(2, 'STYLE'); g(70, 1);
-    g(0, 'STYLE'); g(2, 'STANDARD'); g(70, 0); g(40, 0); g(41, 1); g(50, 0); g(71, 0); g(42, 2.5); g(3, 'romans.shx'); g(4, '');
+    g(0, 'STYLE'); g(2, 'STANDARD'); g(70, 0); g(40, 0); g(41, 1); g(50, 0); g(71, 0); g(42, 2.5); g(3, 'arial.ttf'); g(4, '');
     g(0, 'ENDTAB');
     g(0, 'ENDSEC');
     g(0, 'SECTION'); g(2, 'ENTITIES');
@@ -593,11 +609,18 @@ class Folha {
       g(0, 'SEQEND'); g(8, layer);
     };
 
-    for (const s of this.hSegs) line('LINHAS', X(s.a), Y(s.c), X(s.b), Y(s.c));
-    for (const s of this.vSegs) line('LINHAS', X(s.c), Y(s.a), X(s.c), Y(s.b));
+    // Marcações de as-built primeiro: no AutoCAD o que é gravado antes fica por baixo, então o
+    // marca-texto (faixa larga e opaca) não esconde o fio que ele destaca.
+    for (const [name, list] of Object.entries(asbuilt))
+      for (const { pts, largura } of list) pline(`ASBUILT_${name}`, pts.map(([x, y]) => [X(x), Y(y)]), false, +(largura * 0.7 * MM).toFixed(3));
+
+    // Fios e tracejados como polilinha de 2 pontos com largura (traço firme como no papel).
+    const tracoReto = (layer, x1, y1, x2, y2) => pline(layer, [[x1, y1], [x2, y2]], false, ESP[layer]);
+    for (const s of this.hSegs) tracoReto('LINHAS', X(s.a), Y(s.c), X(s.b), Y(s.c));
+    for (const s of this.vSegs) tracoReto('LINHAS', X(s.c), Y(s.a), X(s.c), Y(s.b));
     for (const t of this.tracejadas) t.vertical
-      ? line('LINHAS_TRACEJADAS', X(t.c), Y(t.a), X(t.c), Y(t.b))
-      : line('LINHAS_TRACEJADAS', X(t.a), Y(t.c), X(t.b), Y(t.c));
+      ? tracoReto('LINHAS_TRACEJADAS', X(t.c), Y(t.a), X(t.c), Y(t.b))
+      : tracoReto('LINHAS_TRACEJADAS', X(t.a), Y(t.c), X(t.b), Y(t.c));
     for (const c of circulos) { g(0, 'CIRCLE'); g(8, 'CIRCULOS'); g(10, X(c.cx)); g(20, Y(c.cy)); g(30, 0); g(40, +(c.r * MM).toFixed(3)); }
     for (const a of arcos) {
       g(0, 'ARC'); g(8, 'CIRCULOS'); g(10, X(a.cx)); g(20, Y(a.cy)); g(30, 0); g(40, +(a.r * MM).toFixed(3));
@@ -605,7 +628,7 @@ class Folha {
     }
     for (const p of polys) {
       const closed = p.length > 3 && p[0][0] === p.at(-1)[0] && p[0][1] === p.at(-1)[1];
-      pline('SIMBOLOS', (closed ? p.slice(0, -1) : p).map(([x, y]) => [X(x), Y(y)]), closed);
+      pline('SIMBOLOS', (closed ? p.slice(0, -1) : p).map(([x, y]) => [X(x), Y(y)]), closed, ESP.SIMBOLOS);
     }
     for (const o of dots) {  // ponto cheio = polilinha circular com largura (como o comando DONUT)
       const r = o.r * MM;
@@ -623,8 +646,6 @@ class Folha {
       if (t.str.length === 1) continue;  // um caractere só: alinhamento simples (o "Fit" distorceria)
       g(72, 5); g(11, p2[0]); g(21, p2[1]); g(31, 0);  // alinhamento "Fit": ocupa a largura original
     }
-    for (const [name, list] of Object.entries(asbuilt))
-      for (const { pts, largura } of list) pline(`ASBUILT_${name}`, pts.map(([x, y]) => [X(x), Y(y)]), false, +(largura * MM).toFixed(3));
     g(0, 'ENDSEC'); g(0, 'EOF');
 
     // DXF R12 usa a página de código Windows-1252; acentos do português cabem em Latin-1.
@@ -751,12 +772,15 @@ function doDicionario(palavra) {
     s = s.replace(/[0158]/g, c => ({ 0: 'O', 1: 'I', 5: 'S', 8: 'B' })[c]);
   if (s.length < 4 || !/^[A-Z]+$/.test(s)) return null;
   const lim = s.length >= 10 ? 2 : 1;
-  let melhor = null, menor = lim + 1;
+  let melhor = null, menor = lim + 1, empate = false;
   for (const [k, v] of DIC) {
     if (Math.abs(k.length - s.length) > lim) continue;
     const dist = levenshtein(s, k);
-    if (dist < menor) { menor = dist; melhor = v; }
+    if (dist < menor) { menor = dist; melhor = v; empate = false; }
+    else if (dist === menor && v !== melhor) empate = true;
   }
+  // Empate entre dois termos ("FCLHA" fica a 1 letra de FOLHA e de FALHA): na dúvida, não troca.
+  if (empate && menor > 0) return null;
   return melhor ? { palavra: melhor, dist: menor } : null;
 }
 
