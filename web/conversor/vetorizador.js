@@ -275,7 +275,8 @@ class Folha {
       const ws = line.words?.length ? line.words : [line];
       const out = [];
       let atual = null;
-      for (const w of ws) {
+      for (const original of ws) {
+        const w = corrigirPalavra(original);   // dicionário técnico e trocas típicas em códigos
         if (w.confidence < 55 || !w.text.trim()) { atual = null; continue; }
         if (!atual) { atual = { ws: [] }; out.push(atual); }
         atual.ws.push(w);
@@ -370,9 +371,15 @@ class Folha {
     // símbolos (a lâmina de um contato é lida como "W" ou "V") e não podem apagar o desenho.
     const novos = [];
     for (const r of curtos) {
-      const str = (r.text || '').trim().replace(/\s+/g, '');
+      let str = corrigirCodigo((r.text || '').trim().replace(/\s+/g, ''));
       if (!str || r.confidence < 70 || str.length > 12) continue;
-      if (!/^[A-Z0-9][A-Z0-9\-\/.:()+]*$/.test(str) || !/\d/.test(str)) continue;
+      if (!/^[A-Z0-9][A-Z0-9\-\/.:()+]*$/.test(str)) continue;
+      // Sem número, só vale se for um termo técnico conhecido (ex.: "RESERVA", "FECHAMENTO").
+      if (!/\d/.test(str)) {
+        const d = doDicionario(str);
+        if (!d) continue;
+        str = d.palavra;
+      }
       if (Math.abs(str.length - r.n) > Math.max(1, Math.round(r.n * 0.5))) continue;
       novos.push({ str, x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, conf: r.confidence, vertical: false, curto: true });
     }
@@ -621,7 +628,11 @@ class Folha {
     g(0, 'ENDSEC'); g(0, 'EOF');
 
     // DXF R12 usa a página de código Windows-1252; acentos do português cabem em Latin-1.
-    const text = d.join('\r\n') + '\r\n';
+    // Sinais tipográficos que o OCR devolve (travessão, aspas curvas) viram os equivalentes
+    // simples; sem isso o AutoCAD mostraria "?" no lugar deles.
+    const text = (d.join('\r\n') + '\r\n')
+      .replace(/[‐-―−]/g, '-').replace(/[‘’‚′]/g, "'")
+      .replace(/[“”„″]/g, '"').replace(/…/g, '...').replace(/[  -​]/g, ' ');
     const bytes = new Uint8Array(text.length);
     for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); bytes[i] = c < 256 ? c : 63; }
     return bytes;
@@ -697,6 +708,93 @@ function areaTexto(t, H) {
 }
 
 // Leituras sobrepostas (mesmo texto lido duas vezes, ou vertical lido na horizontal): fica a mais confiável.
+// ---------- Correção de leitura ----------
+// Vocabulário de desenhos elétricos e de subestação. Uma palavra lida com erro pequeno (uma letra,
+// ou duas nas longas) é trocada pelo termo certo, com acentos.
+const DICIONARIO = [
+  'ABERTURA', 'ACIONAMENTO', 'AJUSTE', 'ALARME', 'ALIMENTAÇÃO', 'ANALÓGICAS', 'AQUECIMENTO', 'ARMÁRIO', 'ATERRAMENTO',
+  'AUTOMAÇÃO', 'AUXILIAR', 'AUXILIARES', 'BANCO', 'BARRA', 'BARRAS', 'BATERIA', 'BLOQUEIO', 'BOBINA', 'BORNE', 'BORNES',
+  'BOTOEIRA', 'CABO', 'CAIXA', 'CAPACITOR', 'CARGA', 'CASA', 'CHAVE', 'CHAVES', 'CIRCUITO', 'CIRCUITOS', 'COMANDO',
+  'COMPRIMENTO', 'CONFIGURAÇÃO', 'CONSENTIMENTO', 'CONTATO', 'CONTATOS', 'CONTROLE', 'CORRENTE', 'DESENHO', 'DIAGRAMA',
+  'DIAGRAMAS', 'DIAGRAMÁTICA', 'DIFERENCIAL', 'DIGITAIS', 'DIMENSÕES', 'DISJUNTOR', 'DISJUNTORES', 'DISPONÍVEIS',
+  'DISTRIBUIÇÃO', 'DOCUMENTO', 'DOCUMENTOS', 'ELETROBRAS', 'ELETRONORTE', 'ENDEREÇAMENTO', 'ENTRADA', 'ENTRADAS',
+  'EQUIPAMENTO', 'EQUIPAMENTOS', 'ESPESSURA', 'EXATIDÃO', 'EXTERNO', 'FABRICANTE', 'FALHA', 'FASE', 'FECHADO',
+  'FECHAMENTO', 'FILTRO', 'FOLHA', 'FONTE', 'FORNECEDOR', 'FREQUÊNCIA', 'FUNCIONAIS', 'FUSÍVEL', 'GERAL', 'GRUPO',
+  'IDENTIFICAÇÃO', 'ILUMINAÇÃO', 'INDUTIVO', 'INTERLIGAÇÃO', 'INTERNO', 'INTERTRAVAMENTO', 'LEGENDAS', 'LIGAÇÃO',
+  'LIGADO', 'LINHA', 'LOCAL', 'LÓGICO', 'LÓGICOS', 'MANUAL', 'MEDIÇÃO', 'MEDIDORES', 'MOTOR', 'MOTORES', 'NEUTRO',
+  'NORMA', 'NORMAL', 'NOTAS', 'PAINEL', 'PAINÉIS', 'PARALELO', 'PARTIDA', 'POLARIDADE', 'POLARIDADES', 'POTENCIAL',
+  'PRIMÁRIO', 'PROJETO', 'PROPRIEDADE', 'PROTEÇÃO', 'QUADRO', 'REFERÊNCIA', 'RELÉ', 'RELÉS', 'REMOTO', 'REPRODUÇÃO',
+  'RESERVA', 'RESERVAS', 'SAÍDA', 'SAÍDAS', 'SECCIONADORA', 'SECCIONADORAS', 'SECUNDÁRIO', 'SEÇÃO', 'SELETORA',
+  'SERVIÇOS', 'SETOR', 'SINALIZAÇÃO', 'SUBESTAÇÃO', 'SUPERVISÃO', 'TENSÃO', 'TERMINAIS', 'TERMINAL', 'TOLERÂNCIA',
+  'TOTAL', 'TRANSDUTORES', 'TRANSFORMADOR', 'TRANSFORMADORES', 'UNIFILAR', 'UTILIZAÇÃO',
+];
+const semAcento = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+const DIC = DICIONARIO.map(p => [semAcento(p), p]);
+
+function levenshtein(a, b) {
+  const d = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let ant = d[0]; d[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const t = d[j];
+      d[j] = Math.min(d[j] + 1, d[j - 1] + 1, ant + (a[i - 1] === b[j - 1] ? 0 : 1));
+      ant = t;
+    }
+  }
+  return d[b.length];
+}
+
+function doDicionario(palavra) {
+  let s = semAcento(palavra);
+  // Palavra quase toda de letras com algum dígito no meio ("DISJUNT0R"): o dígito é uma letra mal lida.
+  if ((s.match(/[A-Z]/g) || []).length >= 0.75 * s.length)
+    s = s.replace(/[0158]/g, c => ({ 0: 'O', 1: 'I', 5: 'S', 8: 'B' })[c]);
+  if (s.length < 4 || !/^[A-Z]+$/.test(s)) return null;
+  const lim = s.length >= 10 ? 2 : 1;
+  let melhor = null, menor = lim + 1;
+  for (const [k, v] of DIC) {
+    if (Math.abs(k.length - s.length) > lim) continue;
+    const dist = levenshtein(s, k);
+    if (dist < menor) { menor = dist; melhor = v; }
+  }
+  return melhor ? { palavra: melhor, dist: menor } : null;
+}
+
+// Trocas típicas do OCR dentro de códigos e números: "CMG-100-S75D00" → "CMG-100-575000",
+// "x82:9" → "X82:9". Conservador: só mexe em letras entre dígitos, ou na única letra de um trecho
+// com 4+ dígitos (assim "S202", modelo de disjuntor, continua "S202").
+function corrigirCodigo(tok) {
+  const mapa = { O: '0', o: '0', D: '0', Q: '0', S: '5', s: '5', I: '1', l: '1', B: '8', Z: '2' };
+  const dig = c => c !== undefined && /\d/.test(c);
+  // Código todo em maiúsculas com só a primeira letra minúscula ("x82:9", "xB2:7"): vira maiúscula.
+  // Precisa ter número, para não mexer em unidades como "kV".
+  let t = /^[a-z][A-Z0-9][^a-z]*$/.test(tok) && /\d/.test(tok) ? tok[0].toUpperCase() + tok.slice(1) : tok;
+  return t.split(/([\-\/.:,()\s]+)/).map(seg => {
+    // Letras trocáveis entre dígitos, inclusive em sequência ("575OO1" → "575001").
+    const ch = [...seg.replace(/(?<=\d)[ODQSsIlBZo]+(?=\d)/g, run => [...run].map(c => mapa[c]).join(''))];
+    const letras = ch.filter(c => /[A-Za-z]/.test(c));
+    if (letras.length === 1 && ch.filter(dig).length >= 4) for (let i = 0; i < ch.length; i++) if (mapa[ch[i]]) ch[i] = mapa[ch[i]];
+    return ch.join('');
+  }).join('');
+}
+
+// Palavra do OCR: termo técnico próximo vira o termo certo (e ganha confiança); código é corrigido.
+function corrigirPalavra(w) {
+  const bruto = w.text.trim();
+  const m = bruto.match(/^([^A-Za-zÀ-ú0-9]*)(.*?)([^A-Za-zÀ-ú0-9]*)$/);
+  const [, antes, miolo, depois] = m || ['', '', bruto, ''];
+  const d = doDicionario(miolo);
+  // Termo técnico reconhecido (exato ou com um erro pequeno) é aceito mesmo com confiança baixa,
+  // mantendo o formato da palavra lida (frase em minúsculas continua em minúsculas).
+  if (d && w.confidence >= 35) {
+    const minusculas = (miolo.match(/[a-zà-ú]/g) || []).length, maiusculas = (miolo.match(/[A-ZÀ-Ú]/g) || []).length;
+    let p = d.palavra;
+    if (minusculas > maiusculas) p = /^[A-ZÀ-Ú]/.test(miolo) ? p[0] + p.slice(1).toLowerCase() : p.toLowerCase();
+    return { ...w, text: antes + p + depois, confidence: Math.max(w.confidence, 70) };
+  }
+  return { ...w, text: corrigirCodigo(bruto) };
+}
+
 function semSobreposicao(texts, H) {
   const ov = (p, q) => Math.max(0, Math.min(p.x1, q.x1) - Math.max(p.x0, q.x0)) * Math.max(0, Math.min(p.y1, q.y1) - Math.max(p.y0, q.y0));
   texts.sort((p, q) => q.conf - p.conf);
